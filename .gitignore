@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+
+# large / user-provided assets
+models/*
+!models/.gitkeep
+wavs/
+scores.json
+gop_data/feats/
+gop_data_libri/
+*.wav
+*.tar.gz
+*.zip

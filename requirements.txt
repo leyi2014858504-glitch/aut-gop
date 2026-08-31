@@ -1,0 +1,9 @@
+numpy
+librosa
+onnxruntime
+torch
+xgboost
+scipy
+scikit-learn
+phonemizer
+espeakng-loader
