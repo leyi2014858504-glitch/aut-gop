@@ -106,6 +106,3 @@ python cv_gop_scorer.py
 - LibriSpeech: CC-BY-4.0 (used for training data only; not redistributed).
 - **G2P note**: `g2p.py` uses `phonemizer` + `espeak-ng`, which is GPL-3.0. For a strictly permissive stack, swap in a rule-based or dictionary G2P; the rest of the pipeline is Apache-2.0.
 
-## Citation
-
-Coming soon (paper in preparation).
