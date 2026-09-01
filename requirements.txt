@@ -7,3 +7,8 @@ scipy
 scikit-learn
 phonemizer
 espeakng-loader
+
+# optional: second-encoder generalization probe (extract_sv_features.py)
+# funasr
+# torchaudio
+# modelscope

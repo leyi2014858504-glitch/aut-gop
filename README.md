@@ -21,6 +21,33 @@ Head retrained on the official train split only + LibriSpeech (no test-speaker l
 - 5-fold speaker-disjoint CV (in-domain split, robustness): sentence 0.625 ± 0.047, phone AUC 0.825 ± 0.008.
 - Sentence-level PCC 0.682 is on par with published fine-tuned systems on SpeechOcean762 (E2E-R ≈ 0.68, GOPT ≈ 0.68; PCC protocol).
 
+## Generalization & ablations
+
+**Cross-encoder** — the identical recipe (frozen encoder → linear CTC head → logprob-GOP → XGBoost), same official split, same LibriSpeech expansion + native calibration, on a structurally different encoder, SenseVoice-Small (512-d, non-autoregressive; via `funasr`/PyTorch):
+
+| | Qwen3-AuT (1024-d) | SenseVoice-Small (512-d) |
+|---|---|---|
+| phone AUC | **0.815** | 0.810 |
+| word PCC | **0.611** | 0.604 |
+| sentence acc Spearman / PCC | **0.553 / 0.682** | 0.515 / 0.636 |
+| XGBoost gain over raw logprob-GOP (sentence) | **+0.127** | +0.007 |
+
+The recipe transfers: phone/word levels match; the aggregation layer's gain is **encoder-dependent** — it rescues the under-calibrated AuT posteriors (+0.127) but adds nothing to already well-calibrated SenseVoice posteriors (+0.007).
+
+**Head capacity** — same AuT features, same split, only the CTC head changes:
+
+| | linear (41K, 162 KB) | DW-CNN (171K, 670 KB) |
+|---|---|---|
+| CTC head PER | 28.0 % | **21.1 %** |
+| phone AUC | 0.815 | 0.822 |
+| word PCC | **0.611** | 0.546 |
+| sentence acc PCC | **0.682** | 0.570 |
+| sentence flu PCC | **0.625** | 0.486 |
+
+The sharper head wins at *recognition* and **loses at assessment**: GOP needs calibrated soft posteriors, not argmax-sharp ones. Training a bigger frame model for accuracy actively hurts pronunciation scoring — the central design finding of this work (`gop_heads.py`, `--head_kind`).
+
+**Frame rate** — segment-mean logprob-GOP is invariant to frame density by construction; empirically, 4× linear upsampling of features collapses PER (25.6 % → 62.6 %) and fusing the native 25 Hz conv tap (window-aligned, `gop_extract_tap25.py`) is neutral (28.5 % vs 28.6 %). 12.5 Hz is sufficient.
+
 ## Quick start
 
 Requirements: Python 3.10+ (developed on 3.14), CPU inference works (`onnxruntime`).
@@ -55,11 +82,14 @@ result = scorer.score_audio(load_wav_16k("my.wav"), "WE CALL IT BEAR")
 | File | Role |
 |---|---|
 | `gop.py` | `GOPScorer` deployable component (encoder ONNX + CTC head + alignment + scorers) |
+| `gop_heads.py` | CTC head factory (`linear` / `cnn`), architecture auto-detected on load |
 | `gop_data.py` | data helpers: wav loading, splits (kaldi spk2utt or flat), scores |
 | `g2p.py` | text -> ARPABET-39 via phonemizer/espeak-ng (IPA bridge) |
 | `eval_gop.py` | CTC forced alignment + GOP variants (prob / logprob / max-logit / AF) |
+| `extract_sv_features.py` | second-encoder probe: SenseVoice-Small features via funasr (optional deps) |
+| `gop_extract_tap25.py` | ONNX graph surgery + 25 Hz conv-tap fusion (frame-rate ablation) |
 | `extract_features.py` | dump frozen-encoder features `[T,1024]` for SpeechOcean762 |
-| `train_gop_head.py` | train the single linear CTC head (CTC loss) |
+| `train_gop_head.py` | train the CTC head (`--head_kind linear|cnn`, CTC loss) |
 | `gop_features.py` | build phone/word/sentence GOP feature matrices (+ native-z calibration) |
 | `train_gop_scorer.py` | train XGBoost scorers (official or ad-hoc split) |
 | `cv_gop_scorer.py` | 5-fold speaker-disjoint CV + hyper-parameter grid |
@@ -106,3 +136,6 @@ python cv_gop_scorer.py
 - LibriSpeech: CC-BY-4.0 (used for training data only; not redistributed).
 - **G2P note**: `g2p.py` uses `phonemizer` + `espeak-ng`, which is GPL-3.0. For a strictly permissive stack, swap in a rule-based or dictionary G2P; the rest of the pipeline is Apache-2.0.
 
+## Scope & limitations
+
+All scoring results are evaluated on SpeechOcean762, whose speakers are **L1-Mandarin**; generalization of the posterior-calibration / leniency findings to other L1 groups is untested (L2-ARCTIC is the natural next probe). Sentence-level numbers are compared against published systems as reported (protocol differences noted), not re-run.

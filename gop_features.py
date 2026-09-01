@@ -31,10 +31,9 @@ LIBRI_DIR = Path("gop_data_libri")
 
 
 def load_head(path: Path, V: int, device: str) -> nn.Module:
-    model = nn.Linear(1024, V + 1).to(device)
-    model.load_state_dict(torch.load(path, map_location=device))
-    model.eval()
-    return model
+    """CTC head (linear/cnn); architecture + input dim auto-detected (encoder-agnostic)."""
+    from gop_heads import load_head as _load
+    return _load(path, V, device)
 
 
 def utt_logp(model: nn.Module, feat: np.ndarray, device: str) -> np.ndarray:
@@ -71,10 +70,12 @@ def per_phone_rows(
     return rows
 
 
-def native_phone_stats(model: nn.Module, V: int, device: str) -> tuple[np.ndarray, np.ndarray]:
+def native_phone_stats(
+    model: nn.Module, V: int, device: str, libri_dir: Path = LIBRI_DIR
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-phone mean/std of logp_mean over LibriSpeech test-clean (native reference)."""
-    labels = json.loads((LIBRI_DIR / "labels_test-clean.json").read_text(encoding="utf-8"))
-    feats, ids = load_features(LIBRI_DIR / "feats_test")
+    labels = json.loads((libri_dir / "labels_test-clean.json").read_text(encoding="utf-8"))
+    feats, ids = load_features(libri_dir / "feats_test")
     sums = np.zeros(V)
     sums2 = np.zeros(V)
     cnt = np.zeros(V)
@@ -100,19 +101,27 @@ def agg_stats(vals: list[float]) -> list[float]:
     ]
 
 
-def build_datasets(model: nn.Module, V: int, device: str, use_calib: bool):
+def build_datasets(
+    model: nn.Module, V: int, device: str, use_calib: bool,
+    data_dir: Path = DATA_DIR, libri_dir: Path = LIBRI_DIR,
+):
     """Extract phone/word/sentence feature matrices + targets for all SO762 utts.
 
+    data_dir/libri_dir parameterize the encoder (e.g. gop_data_sv for SenseVoice).
+    Native calibration stats need encoder-matched Libri feats; when absent
+    (libri_dir missing, e.g. second-encoder probes) fall back to uncalibrated.
     Returns dict of X/y arrays and the utt ids per row level.
     """
-    labels = json.loads((DATA_DIR / "labels.json").read_text(encoding="utf-8"))
-    inv = json.loads((DATA_DIR / "inventory.json").read_text(encoding="utf-8"))
-    split = json.loads((DATA_DIR / "split.json").read_text(encoding="utf-8"))
+    labels = json.loads((data_dir / "labels.json").read_text(encoding="utf-8"))
+    inv = json.loads((data_dir / "inventory.json").read_text(encoding="utf-8"))
+    split = json.loads((data_dir / "split.json").read_text(encoding="utf-8"))
     scores = load_scores(DEFAULT_SCORES_PATH)
 
-    native_mean, native_std = native_phone_stats(model, V, device)
+    use_calib = use_calib and (libri_dir / "feats_test").is_dir()
+    native_mean, native_std = native_phone_stats(model, V, device, libri_dir) \
+        if use_calib else (np.zeros(V), np.ones(V))
 
-    feats, ids = load_features(DATA_DIR / "feats")
+    feats, ids = load_features(data_dir / "feats")
     feat_map = {u: normalize_feat(f) for u, f in zip(ids, feats)}
     del feats
 

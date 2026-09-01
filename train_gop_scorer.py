@@ -26,6 +26,10 @@ DATA_DIR = Path("gop_data")
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--head", type=Path, default=DATA_DIR / "ctc_head_libri.pt")
+    ap.add_argument("--data_dir", type=Path, default=DATA_DIR,
+                    help="encoder dataset dir (gop_data / gop_data_sv ...)")
+    ap.add_argument("--libri_dir", type=Path, default=Path("gop_data_libri"),
+                    help="native (LibriSpeech) feats dir for calibration, must match encoder")
     ap.add_argument("--use_calib", action="store_true",
                     help="include native-z (LibriSpeech) calibrated features")
     ap.add_argument("--train_ids_file", type=Path, default=None,
@@ -37,12 +41,14 @@ def main() -> None:
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    inv = json.loads((DATA_DIR / "inventory.json").read_text(encoding="utf-8"))
+    inv = json.loads((args.data_dir / "inventory.json").read_text(encoding="utf-8"))
     V = len(inv)
 
-    print(f"head: {args.head}  calib: {args.use_calib}")
+    print(f"head: {args.head}  data_dir: {args.data_dir}  calib: {args.use_calib}")
     model = gf.load_head(args.head, V, device)
-    datasets, split, _ = gf.build_datasets(model, V, device, args.use_calib)
+    datasets, split, _ = gf.build_datasets(
+        model, V, device, args.use_calib, args.data_dir, args.libri_dir
+    )
     if args.train_ids_file and args.test_ids_file:
         tr = set(load_split_ids(args.train_ids_file))
         te = set(load_split_ids(args.test_ids_file))
