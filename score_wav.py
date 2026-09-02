@@ -18,8 +18,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Score a WAV against reference text")
     ap.add_argument("--wav", required=True, help="path to audio file (wav/flac/mp3...)")
     ap.add_argument("--text", required=True, help="reference transcript, e.g. 'WE CALL IT BEAR'")
-    ap.add_argument("--head", default="ctc_head_libri.pt")
-    ap.add_argument("--scorer_tag", default="cv_best_n200_d4_lr0.05")
+    ap.add_argument("--head", default="ctc_head_official.pt")
+    ap.add_argument("--scorer_tag", default="official_shape")
     args = ap.parse_args()
 
     scorer = GOPScorer(head=args.head, scorer_tag=args.scorer_tag)

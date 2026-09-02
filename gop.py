@@ -4,9 +4,10 @@ Pipeline:
   audio (16 kHz float32) -> AuT encoder (ONNX) -> linear CTC head
   -> logprob-GOP features -> XGBoost scorers -> phone / word / sentence scores
 
-Single-env runtime deps: onnxruntime, librosa, torch, xgboost,
-phonemizer + espeakng-loader (G2P). All feature layouts match the trained
-scorers (gop_data/scorer_*_cv_best_n200_d4_lr0.05.ubj, calibrated features).
+Single-env runtime deps: onnxruntime, librosa, xgboost,
+phonemizer + espeakng-loader (G2P; torch only when no .npz head twin exists).
+Feature layout matches the SHAPE-feature scorers (gop_data/scorer_*_official_shape.ubj,
+calibrated features).
 
 Example:
     from gop import GOPScorer
@@ -23,12 +24,13 @@ from typing import Optional, Union
 import numpy as np
 
 from g2p import text_to_arpabet_words
+from gop_data import shape_mean_vec, shape_stats, shape_vec
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = PROJECT_ROOT / "gop_data"
 DEFAULT_ENCODER_DIR = PROJECT_ROOT / "models" / "qwen3-asr-0.6b-int4"
-DEFAULT_HEAD = "ctc_head_libri.pt"
-DEFAULT_SCORER_TAG = "cv_best_n200_d4_lr0.05"
+DEFAULT_HEAD = "ctc_head_official.pt"
+DEFAULT_SCORER_TAG = "official_shape"
 
 
 # ---------- mel front-end (mirrors asr.py / Qwen3-ASR config) ----------
@@ -141,6 +143,7 @@ def _per_phone_rows(logp: np.ndarray, target: list[int], blank: int):
                 "prob_mean": float(probs[fr, target[i]].mean()),
                 "dur": float(len(fr)),
                 "phone": int(target[i]),
+                **shape_stats(probs[fr], logp[fr], target[i], blank),
             }
         )
     return rows
@@ -165,9 +168,8 @@ class GOPScorer:
         head: str = DEFAULT_HEAD,
         scorer_tag: str = DEFAULT_SCORER_TAG,
         device: Optional[str] = None,
+        encode_fn=None,
     ):
-        import torch
-        import torch.nn as nn
         import xgboost as xgb
 
         data_dir = Path(data_dir)
@@ -179,10 +181,23 @@ class GOPScorer:
         self.native_mean = ns["mean"]
         self.native_std = ns["std"]
 
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.head = nn.Linear(1024, self.V + 1)
-        self.head.load_state_dict(torch.load(data_dir / head, map_location=self.device))
-        self.head.to(self.device).eval()
+        # Linear CTC head: prefer the torch-free .npz twin (runs in the 3.11
+        # inference env); fall back to torch when only the .pt exists (3.14).
+        npz = data_dir / head.replace(".pt", ".npz")
+        self.head_torch = None
+        if npz.is_file():
+            h = np.load(npz)
+            self.head_W = h["W"].astype(np.float32)   # [V+1, D]
+            self.head_b = h["b"].astype(np.float32)
+        else:
+            import torch
+            import torch.nn as nn
+
+            self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+            lin = nn.Linear(1024, self.V + 1)
+            lin.load_state_dict(torch.load(data_dir / head, map_location=self.device))
+            lin.to(self.device).eval()
+            self.head_torch = lin
 
         self.scorer_phone = xgb.Booster()
         self.scorer_phone.load_model(str(data_dir / f"scorer_phone_{scorer_tag}.ubj"))
@@ -193,29 +208,42 @@ class GOPScorer:
         self.scorer_sentflu = xgb.Booster()
         self.scorer_sentflu.load_model(str(data_dir / f"scorer_sentflu_{scorer_tag}.ubj"))
 
-        self.encoder = _AuTEncoder(encoder_dir) if encoder_dir else None
+        # encoder: own ONNX session, caller-provided fn (share the ASR session), or none
+        self.encode_fn = encode_fn
+        self.encoder = _AuTEncoder(encoder_dir) if (encoder_dir and encode_fn is None) else None
+
+    def _head_logp(self, f: np.ndarray) -> np.ndarray:
+        """Normalized feats [T,D] -> log posteriors [T, V+1] (numpy fast path)."""
+        if self.head_torch is None:
+            logits = f @ self.head_W.T + self.head_b
+            m = logits.max(axis=-1, keepdims=True)
+            return logits - m - np.log(np.exp(logits - m).sum(axis=-1, keepdims=True))
+        import torch
+
+        with torch.no_grad():
+            out = self.head_torch(torch.from_numpy(f).unsqueeze(1).to(self.device))
+            lp = torch.log_softmax(out, dim=-1)
+            return lp.squeeze(1).cpu().numpy()
 
     # ---- public API ----
     def score_audio(self, audio_16k: np.ndarray, text: str) -> dict:
         """audio_16k: mono float32 @16 kHz; text: reference transcript."""
-        if self.encoder is None:
-            raise ValueError("encoder_dir was not provided")
-        feats = self.encoder.encode(audio_16k)
+        if self.encode_fn is not None:
+            feats = np.asarray(self.encode_fn(audio_16k), dtype=np.float32)
+        elif self.encoder is not None:
+            feats = self.encoder.encode(audio_16k)
+        else:
+            raise ValueError("no encoder: pass encoder_dir or encode_fn")
+        if feats.ndim == 3:
+            feats = feats[0]
         return self.score_features(feats, text)
 
     def score_features(self, feats: np.ndarray, text: str) -> dict:
         """feats: [T, 1024] AuT encoder features (frozen)."""
-        import torch
-        import torch.nn.functional as F
-
         # per-utterance normalize (matches training)
         f = feats.astype(np.float32)
         f = (f - f.mean()) / (f.std() + 1e-6)
-        with torch.no_grad():
-            logp = F.log_softmax(
-                self.head(torch.from_numpy(f).unsqueeze(1).to(self.device)),
-                dim=-1,
-            ).squeeze(1).cpu().numpy()
+        logp = self._head_logp(f)
 
         word_phones = text_to_arpabet_words(text)
         flat = [p for w in word_phones for p in w]
@@ -236,7 +264,8 @@ class GOPScorer:
                 continue
             feat = np.asarray(
                 [r["logp_mean"], r["logp_min"], r["logp_max"], r["logp_std"],
-                 r["prob_mean"], r["dur"], r["phone"], z(r)], dtype=np.float32
+                 r["prob_mean"], r["dur"], r["phone"]]
+                + shape_vec(r) + [z(r)], dtype=np.float32
             ).reshape(1, -1)
             p = float(self.scorer_phone.predict(xgb_dmatrix(feat))[0])
             phone_out.append({"phone": self.inv[r["phone"]], "gop": r["logp_mean"],
@@ -258,7 +287,8 @@ class GOPScorer:
             feat = np.asarray(
                 _agg([r["logp_mean"] for r in seg])
                 + _agg([z(r) for r in seg])
-                + [len(seg), float(np.mean([r["dur"] for r in seg]))],
+                + [len(seg), float(np.mean([r["dur"] for r in seg]))]
+                + shape_mean_vec(seg),
                 dtype=np.float32,
             ).reshape(1, -1)
             word_out.append(
@@ -272,7 +302,8 @@ class GOPScorer:
                 _agg([r["logp_mean"] for r in rows])
                 + _agg([z(r) for r in rows])
                 + _agg([r["logp_min"] for r in rows])
-                + [len(rows), float(np.mean([r["dur"] for r in rows]))],
+                + [len(rows), float(np.mean([r["dur"] for r in rows]))]
+                + shape_mean_vec(rows),
                 dtype=np.float32,
             ).reshape(1, -1)
             acc = float(self.scorer_sent.predict(xgb_dmatrix(feat))[0])

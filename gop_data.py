@@ -142,6 +142,49 @@ def upsample_linear(f: np.ndarray, k: int) -> np.ndarray:
     return (f[i0] * (1.0 - w) + f[i1] * w).astype(np.float32)
 
 
+# ---------- posterior SHAPE features (shared: torch-free, research + deploy) ----------
+
+SHAPE_AGG = ("mean", "min", "max", "std")
+# Fixed order (feature-vector layout): never reorder without retraining scorers.
+SHAPE_KEYS = [f"{m}_{s}" for m in ("ent", "marg", "comp", "share") for s in SHAPE_AGG]
+
+
+def shape_stats(pfr: np.ndarray, lpfr: np.ndarray, ref: int, blank: int) -> dict:
+    """Frame-level posterior SHAPE features over a phone's span.
+
+    pfr/lpfr: [F, C] prob / log-prob rows of the aligned frames.
+    - ent:    total uncertainty (full posterior entropy)
+    - marg:   top1-top2 probability margin (decision hesitation)
+    - comp:   best NON-reference, NON-blank phone probability (confuser mass)
+    - share:  comp / (ref + comp)  (pairwise confusability, e.g. /n/ stealing /l/)
+    """
+    ent = -(np.where(pfr > 0, pfr * lpfr, 0.0)).sum(1)
+    srt = np.sort(pfr, axis=1)
+    marg = srt[:, -1] - srt[:, -2]
+    keep = np.ones(pfr.shape[1], dtype=bool)
+    keep[ref] = False
+    keep[blank] = False
+    p_comp = pfr[:, keep].max(1)
+    p_ref = pfr[:, ref]
+    share = p_comp / (p_ref + p_comp + 1e-9)
+    out = {}
+    for name, v in (("ent", ent), ("marg", marg), ("comp", p_comp), ("share", share)):
+        out[f"{name}_mean"] = float(v.mean())
+        out[f"{name}_min"] = float(v.min())
+        out[f"{name}_max"] = float(v.max())
+        out[f"{name}_std"] = float(v.std())
+    return out
+
+
+def shape_vec(r: dict) -> list[float]:
+    return [r[k] for k in SHAPE_KEYS]
+
+
+def shape_mean_vec(rows: list[dict]) -> list[float]:
+    """Average each shape key over a word/sentence phone span (fixed SHAPE_KEYS order)."""
+    return [float(np.mean([r[k] for r in rows])) for k in SHAPE_KEYS]
+
+
 def speaker_split(
     utt_ids: list[str],
     seed: int = 42,

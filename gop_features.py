@@ -18,9 +18,13 @@ import torch.nn.functional as F
 from eval_gop import ctc_forced_alignment
 from gop_data import (
     DEFAULT_SCORES_PATH,
+    SHAPE_KEYS,
     load_features,
     load_scores,
     normalize_feat,
+    shape_mean_vec,
+    shape_stats,
+    shape_vec,
     strip_stress,
     upsample_linear,
     utt_words,
@@ -56,17 +60,17 @@ def per_phone_rows(
             continue
         fr = np.asarray(fr)
         lp = logp[fr, target[i]]
-        rows.append(
-            {
-                "logp_mean": float(lp.mean()),
-                "logp_min": float(lp.min()),
-                "logp_max": float(lp.max()),
-                "logp_std": float(lp.std()),
-                "prob_mean": float(probs[fr, target[i]].mean()),
-                "dur": float(len(fr)),
-                "phone": int(target[i]),
-            }
-        )
+        row = {
+            "logp_mean": float(lp.mean()),
+            "logp_min": float(lp.min()),
+            "logp_max": float(lp.max()),
+            "logp_std": float(lp.std()),
+            "prob_mean": float(probs[fr, target[i]].mean()),
+            "dur": float(len(fr)),
+            "phone": int(target[i]),
+        }
+        row.update(shape_stats(probs[fr], logp[fr], target[i], blank))
+        rows.append(row)
     return rows
 
 
@@ -132,6 +136,7 @@ def build_datasets(
     def phone_feat(r: dict) -> list[float]:
         f = [r["logp_mean"], r["logp_min"], r["logp_max"], r["logp_std"],
              r["prob_mean"], r["dur"], r["phone"]]
+        f += shape_vec(r)
         if use_calib:
             f.append(z(r))
         return f
@@ -179,6 +184,7 @@ def build_datasets(
                 agg_stats([r["logp_mean"] for r in seg])
                 + agg_stats([z(r) for r in seg])
                 + [len(seg), np.mean([r["dur"] for r in seg])]
+                + shape_mean_vec(seg)
             )
             Wy.append(float(wacc))
             W_utt.append(u)
@@ -190,6 +196,7 @@ def build_datasets(
                 + agg_stats([z(r) for r in rows])
                 + agg_stats([r["logp_min"] for r in rows])
                 + [len(rows), np.mean([r["dur"] for r in rows])]
+                + shape_mean_vec(rows)
             )
             Sy_acc.append(float(scores[u]["accuracy"]))
             Sy_flu.append(float(scores[u]["fluency"]))
